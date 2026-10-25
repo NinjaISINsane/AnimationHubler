@@ -34,13 +34,13 @@ studioStore = ReplicatedStorage:FindFirstChild("AnimStealer_Library") or Instanc
 studioStore.Name = "AnimStealer_Library"
 studioStore.Parent = ReplicatedStorage
 end
-local VERSION = "3.3"
+local VERSION = "4.0"
 local CFG = {
 fps = 60, rootMotion = false, applyAvatar = true, cloneDist = 6, toasts = true, uiScale = nil,
-loop = true, speed = 1, quickSelect = true, autoTarget = true, hoverTag = true, bufferSecs = 10,
+loop = true, speed = 1, quickSelect = true, autoDual = false, hoverTag = true, bufferSecs = 10, countdown = false, cloneGap = 4,
 mirror = false, reverse = false, bufferOn = false, -- session only
 }
-local SAVE_KEYS = {"fps", "rootMotion", "applyAvatar", "cloneDist", "toasts", "uiScale", "loop", "speed", "quickSelect", "autoTarget", "hoverTag", "bufferSecs"}
+local SAVE_KEYS = {"fps", "rootMotion", "applyAvatar", "cloneDist", "toasts", "uiScale", "loop", "speed", "quickSelect", "autoDual", "hoverTag", "bufferSecs", "countdown", "cloneGap"}
 local MAX_FRAMES = 20000
 if HAS_FS then
 pcall(function()
@@ -72,9 +72,9 @@ local target, highlight, targetConn = nil, nil, nil
 local hoverModel, hoverHL = nil, nil
 local overSet = {}
 function Fn.isOver() for _, v in pairs(overSet) do if v then return true end end return false end
-local rec = {active = false, takes = {}, t = 0, acc = 0}
-local play = {active = false, paused = false, time = 0, anim = nil, frames = nil, dir = 1, a = nil, b = nil, revHold = false, prevPaused = false}
-local clone, cloneBase = nil, CFrame.new()
+local rec = {active = false, takes = {}, t = 0, acc = 0, counting = false}
+local play = {active = false, paused = false, time = 0, anim = nil, frames = nil, dir = 1, a = nil, b = nil, revHold = false, prevPaused = false, dur = 0}
+local scene = {}
 local buf = {take = nil, t = 0, acc = 0, trim = 0}
 local toast, refreshLibrary, refreshPlayUI, refreshRecordUI, refreshTarget, switchTab, setStatus
 local stopRecording, stopPlayback, startRecording, spawnClone, setTarget, loadAnim, refreshBanner
@@ -161,7 +161,7 @@ end
 return a.root:Lerp(b.root, alpha), scratch
 end
 function Fn.serializeAnim(a)
-local out = {version = 2, name = a.name, animType = a.rig, duration = Fn.round(a.duration, 4), fps = a.fps, frames = {}}
+local out = {version = 2, name = a.name, animType = a.rig, duration = Fn.round(a.duration, 4), fps = a.fps, frames = {}, link = a.link, offset = a.offset and Fn.cfToArr(a.offset) or nil}
 for i, f in ipairs(a.frames) do
 local pf = {}
 for n, cf in pairs(f.parts) do pf[n] = Fn.cfToArr(cf) end
@@ -173,6 +173,8 @@ function Fn.deserializeAnim(json, name)
 local ok, raw = pcall(function() return HttpService:JSONDecode(json) end)
 if not ok or type(raw) ~= "table" then return nil end
 local anim = {name = name, rig = "?", fps = 60, frames = {}, duration = 0}
+if raw.link then anim.link = raw.link end
+if raw.offset then anim.offset = Fn.arrToCF(raw.offset) end
 if raw.version == 2 then
 anim.rig = raw.animType or "?"
 anim.fps = raw.fps or 60
@@ -489,13 +491,15 @@ task.wait(0.3)
 f:Destroy()
 end)
 end
-local banner = Fn.new("Frame", {Parent = screenGui, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 12), Size = UDim2.fromOffset(330, 42), BackgroundColor3 = THEME.panel, BorderSizePixel = 0, Visible = false, ZIndex = 30})
+local banner = Fn.new("Frame", {Parent = screenGui, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 12), Size = UDim2.fromOffset(290, 42), BackgroundColor3 = THEME.panel, BorderSizePixel = 0, Visible = false, ZIndex = 30})
 Fn.corner(banner, 10)
 Fn.stroke(banner, THEME.accent, 2)
 Fn.trackOver(banner)
-local bannerText = Fn.label(banner, "PREVIEWING", 13, THEME.text, Enum.Font.GothamBold, nil, {Position = UDim2.new(0, 14, 0, 0), Size = UDim2.new(1, -110, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 31})
-local bannerExit = Fn.makeButton(banner, "EXIT  [X]", THEME.red, UDim2.fromOffset(86, 30), UDim2.new(1, -94, 0.5, -15), 13)
+local bannerText = Fn.label(banner, "PREVIEWING", 13, THEME.text, Enum.Font.GothamBold, nil, {Position = UDim2.new(0, 14, 0, 0), Size = UDim2.new(1, -160, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 31})
+local bannerExit = Fn.makeButton(banner, "EXIT", THEME.gray, UDim2.fromOffset(60, 30), UDim2.new(1, -66, 0.5, -15), 13)
 bannerExit.ZIndex = 32
+local bannerRec = Fn.makeButton(banner, "REC", THEME.red, UDim2.fromOffset(60, 30), UDim2.new(1, -130, 0.5, -15), 13)
+bannerRec.ZIndex = 32
 local hoverTag = Fn.label(screenGui, "", 12, THEME.text, Enum.Font.GothamBold, Enum.TextXAlignment.Left, {Size = UDim2.fromOffset(190, 20), BackgroundTransparency = 0, BackgroundColor3 = THEME.panel, Visible = false, ZIndex = 25, TextTruncate = Enum.TextTruncate.AtEnd})
 Fn.corner(hoverTag, 5)
 Fn.stroke(hoverTag, THEME.accent, 2)
@@ -549,6 +553,7 @@ tabBtns[name] = {btn = b, line = underline}
 b.MouseButton1Click:Connect(function() switchTab(name) end)
 end
 function switchTab(name)
+if name == "REC" and play.active then stopPlayback() end
 for n, p in pairs(pages) do p.Visible = (n == name) end
 for n, t in pairs(tabBtns) do
 local on = n == name
@@ -604,36 +609,97 @@ motor("Root Joint", hrp, torso, CFrame.new(), CFrame.new())
 dummy.PrimaryPart = hrp
 return dummy
 end
-function Fn.setCloneRig(active)
-if not clone then return end
-for _, d in ipairs(clone:GetDescendants()) do
+function Fn.setCloneRig(tr, active)
+local c = tr.clone
+if not c then return end
+for _, d in ipairs(c:GetDescendants()) do
 if d:IsA("Motor6D") then d.Enabled = not active end
 end
 for _, n in ipairs(R6_PARTS) do
-local p = clone:FindFirstChild(n)
+local p = c:FindFirstChild(n)
 if p then p.Anchored = active end
 end
-local hrp = clone:FindFirstChild("HumanoidRootPart")
+local hrp = c:FindFirstChild("HumanoidRootPart")
 if hrp then hrp.Anchored = true end
 end
-function spawnClone()
-if stopPlayback then stopPlayback(true) end
-if clone then clone:Destroy() clone = nil end
+function Fn.slotCFrame(i)
 local char = player.Character
 local hrp = char and char:FindFirstChild("HumanoidRootPart")
-if not hrp then toast("No character to spawn next to", "err") return end
-clone = Fn.createDummy()
-local pos = (hrp.CFrame * CFrame.new(0, 0, -CFG.cloneDist)).Position
-clone.HumanoidRootPart.Anchored = true
-clone:PivotTo(CFrame.lookAt(pos, Vector3.new(hrp.Position.X, pos.Y, hrp.Position.Z)))
-clone.Parent = Workspace
-local mine = clone
-if CFG.applyAvatar then
+if not hrp then return nil end
+local x = (i - (#scene + 1) / 2) * CFG.cloneGap
+local pos = (hrp.CFrame * CFrame.new(x, 0, -CFG.cloneDist)).Position
+return CFrame.lookAt(pos, Vector3.new(hrp.Position.X, pos.Y, hrp.Position.Z))
+end
+function Fn.buildClone(tr, cf)
+if tr.clone then tr.clone:Destroy() end
+local c = Fn.createDummy()
+c.HumanoidRootPart.Anchored = true
+c:PivotTo(cf)
+c.Parent = Workspace
+tr.clone, tr.base = c, cf
+end
+function Fn.layoutScene()
+for i, tr in ipairs(scene) do
+local cf
+local a1 = scene[1] and scene[1].anim
+if i > 1 and tr.anim and tr.anim.offset and a1 and tr.anim.link and tr.anim.link == a1.link then
+cf = scene[1].base * tr.anim.offset
+else
+cf = Fn.slotCFrame(i)
+end
+if not cf then toast("No character to spawn next to", "err") return false end
+Fn.buildClone(tr, cf)
+if i == 1 and CFG.applyAvatar then
+local mine = tr.clone
 task.spawn(function()
 local ok, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(player.UserId) end)
 local hum = mine.Parent and mine:FindFirstChildOfClass("Humanoid")
 if ok and desc and hum and not play.active then pcall(function() hum:ApplyDescriptionClientServer(desc) end) end
 end)
+end
+end
+return true
+end
+function Fn.sceneAlive()
+if #scene == 0 then return false end
+for _, tr in ipairs(scene) do
+if not tr.clone or not tr.clone.Parent then return false end
+end
+return true
+end
+function Fn.recalcDur()
+local d = 0
+for _, tr in ipairs(scene) do
+if tr.anim then d = math.max(d, tr.anim.duration + tr.delay) end
+end
+play.dur = d
+end
+function spawnClone()
+stopPlayback(true)
+if #scene == 0 then scene[1] = {anim = play.anim, frames = play.frames, delay = 0, mirror = false} end
+Fn.layoutScene()
+Fn.refreshScene()
+refreshPlayUI()
+refreshBanner()
+end
+function Fn.loadScene(list, autoplay)
+stopPlayback(true)
+for _, tr in ipairs(scene) do if tr.clone then tr.clone:Destroy() end end
+scene = {}
+for i, a in ipairs(list) do scene[i] = {anim = a, frames = Fn.getPlayable(a), delay = 0, mirror = false} end
+play.anim, play.frames = list[1], scene[1].frames
+play.time, play.a, play.b = 0, nil, nil
+play.dir = CFG.reverse and -1 or 1
+Fn.recalcDur()
+if CFG.reverse then play.time = play.dur end
+Fn.layoutScene()
+Fn.refreshScene()
+refreshPlayUI()
+refreshBanner()
+if autoplay and Fn.beginRig() then
+play.paused = false
+refreshPlayUI()
+refreshBanner()
 end
 end
 function Fn.setHover(model)
@@ -686,7 +752,7 @@ function Fn.rayAtScreen(loc)
 local cam = Workspace.CurrentCamera
 if not cam then return nil end
 local ex = {}
-if clone then ex[#ex + 1] = clone end
+for _, tr in ipairs(scene) do if tr.clone then ex[#ex + 1] = tr.clone end end
 if player.Character then ex[#ex + 1] = player.Character end
 rayParams.FilterDescendantsInstances = ex
 local ray = cam:ViewportPointToRay(loc.X, loc.Y)
@@ -768,6 +834,27 @@ toast(string.format("Grabbed last %.1fs", out[#out].t), "ok")
 refreshRecordUI()
 end
 local recConn
+function Fn.requestRecord()
+if rec.active then stopRecording() return end
+if rec.counting then rec.counting = false setStatus("idle") toast("Countdown cancelled") return end
+if play.active then stopPlayback(true) refreshBanner() end
+if CFG.countdown then
+rec.counting = true
+task.spawn(function()
+for i = 3, 1, -1 do
+if not rec.counting then return end
+toast(tostring(i) .. " ...")
+setStatus("recording in " .. i, THEME.orange)
+task.wait(1)
+end
+if not rec.counting then return end
+rec.counting = false
+startRecording()
+end)
+else
+startRecording()
+end
+end
 function startRecording()
 if rec.active then return end
 if play.active then stopPlayback() end
@@ -811,13 +898,14 @@ if not rec.active then return end
 rec.active = false
 if recConn then recConn:Disconnect() recConn = nil end
 pending = {}
-for _, take in ipairs(rec.takes) do
+local link = #rec.takes > 1 and ("rec" .. tostring(os.time())) or nil
+for i, take in ipairs(rec.takes) do
 local n = #take.frames
 if n >= 2 then
 local t0 = take.frames[1].t
 local dur = take.frames[n].t - t0
 for _, f in ipairs(take.frames) do f.t = f.t - t0 end
-pending[#pending + 1] = {name = "", label = take.label, rig = take.rig, fps = math.floor((n - 1) / math.max(dur, 1e-3) + 0.5), duration = dur, frames = take.frames}
+pending[#pending + 1] = {name = "", label = take.label, rig = take.rig, fps = math.floor((n - 1) / math.max(dur, 1e-3) + 0.5), duration = dur, frames = take.frames, link = link, offset = (i > 1 and rec.takes[1].startCF and take.startCF) and rec.takes[1].startCF:ToObjectSpace(take.startCF) or nil}
 end
 end
 rec.takes = {}
@@ -831,27 +919,41 @@ end
 refreshRecordUI()
 end
 function Fn.applyPose(t)
-if not play.frames or not clone or not play.anim then return end
-local hrp = clone:FindFirstChild("HumanoidRootPart")
-if not hrp then return end
-local rootRel, parts = Fn.poseAt(play.frames, math.clamp(t, 0, play.anim.duration))
-if CFG.mirror then rootRel = Fn.mirrorCF(rootRel) end
-local rootCF = cloneBase * (CFG.rootMotion and rootRel or CFrame.new())
+for _, tr in ipairs(scene) do
+local c = tr.clone
+if c and tr.frames and tr.anim then
+local hrp = c:FindFirstChild("HumanoidRootPart")
+if hrp then
+for k in pairs(scratch) do scratch[k] = nil end
+local lt = math.clamp(t - tr.delay, 0, tr.anim.duration)
+local rootRel, parts = Fn.poseAt(tr.frames, lt)
+local mir = CFG.mirror ~= tr.mirror
+if mir then rootRel = Fn.mirrorCF(rootRel) end
+local rootCF = tr.base * (CFG.rootMotion and rootRel or CFrame.new())
 hrp.CFrame = rootCF
 for n, cf in pairs(parts) do
-local name, c = n, cf
-if CFG.mirror then c = Fn.mirrorCF(cf) name = SWAP[n] or n end
-local p = clone:FindFirstChild(name)
-if p and p:IsA("BasePart") then p.CFrame = rootCF * c end
+local name, cc = n, cf
+if mir then cc = Fn.mirrorCF(cf) name = SWAP[n] or n end
+local p = c:FindFirstChild(name)
+if p and p:IsA("BasePart") then p.CFrame = rootCF * cc end
+end
+end
+end
 end
 end
 function Fn.beginRig()
-if not clone or not clone.Parent then spawnClone() end
-if not clone then return false end
+if #scene == 0 then scene[1] = {anim = play.anim, frames = play.frames, delay = 0, mirror = false} end
+local need = false
+for _, tr in ipairs(scene) do
+if not tr.clone or not tr.clone.Parent then need = true end
+end
+if need and not Fn.layoutScene() then return false end
 if not play.active then
 play.active = true
-cloneBase = clone.HumanoidRootPart.CFrame
-Fn.setCloneRig(true)
+for _, tr in ipairs(scene) do
+tr.base = tr.clone.HumanoidRootPart.CFrame
+Fn.setCloneRig(tr, true)
+end
 end
 return true
 end
@@ -859,9 +961,13 @@ function stopPlayback(silent)
 local was = play.active
 play.active, play.paused, play.time, play.revHold = false, false, 0, false
 play.dir = CFG.reverse and -1 or 1
-if was and clone and clone.Parent then
-Fn.setCloneRig(false)
-clone.HumanoidRootPart.CFrame = cloneBase
+if was then
+for _, tr in ipairs(scene) do
+if tr.clone and tr.clone.Parent then
+Fn.setCloneRig(tr, false)
+tr.clone.HumanoidRootPart.CFrame = tr.base
+end
+end
 end
 if not silent then
 if refreshPlayUI then refreshPlayUI() end
@@ -869,20 +975,75 @@ if refreshBanner then refreshBanner() end
 end
 end
 function loadAnim(anim, autoplay)
-play.anim, play.frames = anim, Fn.getPlayable(anim)
-play.time, play.a, play.b = 0, nil, nil
-for k in pairs(scratch) do scratch[k] = nil end
-play.dir = CFG.reverse and -1 or 1
-if CFG.reverse then play.time = anim.duration end
-if play.active then
-play.paused = true
-Fn.applyPose(play.time)
+local list
+if anim.link then
+list = {}
+for _, a in pairs(library) do if a.link == anim.link then list[#list + 1] = a end end
+table.sort(list, function(x, y) return (x.offset == nil and 0 or 1) < (y.offset == nil and 0 or 1) end)
+if #list < 2 then list = nil end
 end
-if autoplay then
-if Fn.beginRig() then play.paused = false end
-end
+if list then
+Fn.loadScene(list, autoplay)
+elseif #scene <= 1 then
+Fn.loadScene({anim}, autoplay)
+else
+stopPlayback(true)
+Fn.assignAnim(1, anim)
+play.time = 0
+if autoplay and Fn.beginRig() then play.paused = false end
 refreshPlayUI()
 refreshBanner()
+end
+end
+function Fn.assignAnim(i, anim)
+local tr = scene[i]
+if not tr then return end
+tr.anim, tr.frames = anim, Fn.getPlayable(anim)
+if i == 1 then play.anim, play.frames = anim, tr.frames end
+Fn.recalcDur()
+if play.active then Fn.applyPose(play.time) end
+refreshPlayUI()
+Fn.refreshScene()
+end
+function Fn.addClone()
+if play.active then stopPlayback(true) end
+if #scene >= 6 then toast("Max 6 clones", "err") return end
+local tr = {anim = libSelected and library[libSelected] or nil, delay = 0, mirror = false}
+if tr.anim then tr.frames = Fn.getPlayable(tr.anim) end
+scene[#scene + 1] = tr
+if #scene == 1 and tr.anim then play.anim, play.frames = tr.anim, tr.frames end
+Fn.recalcDur()
+if Fn.layoutScene() then toast("Added clone #" .. #scene, "ok") end
+Fn.refreshScene()
+refreshPlayUI()
+refreshBanner()
+end
+function Fn.removeTrack(i)
+if play.active then stopPlayback(true) end
+local tr = scene[i]
+if not tr then return end
+if tr.clone then tr.clone:Destroy() end
+table.remove(scene, i)
+if i == 1 then
+play.anim = scene[1] and scene[1].anim or nil
+play.frames = scene[1] and scene[1].frames or nil
+end
+Fn.recalcDur()
+Fn.layoutScene()
+Fn.refreshScene()
+refreshPlayUI()
+refreshBanner()
+end
+function Fn.resetClones()
+if play.active then stopPlayback(true) end
+for i = #scene, 2, -1 do
+if scene[i].clone then scene[i].clone:Destroy() end
+table.remove(scene, i)
+end
+Fn.recalcDur()
+Fn.layoutScene()
+Fn.refreshScene()
+refreshPlayUI()
 end
 function Fn.togglePlay()
 if rec.active then toast("Stop recording first", "err") return end
@@ -891,7 +1052,7 @@ if play.active and not play.paused then
 play.paused = true
 else
 if not Fn.beginRig() then return end
-local lo, hi = play.a or 0, play.b or play.anim.duration
+local lo, hi = play.a or 0, play.b or play.dur
 if play.dir > 0 and play.time >= hi - 0.001 then play.time = lo end
 if play.dir < 0 and play.time <= lo + 0.001 then play.time = hi end
 play.paused = false
@@ -903,7 +1064,7 @@ function Fn.seek(t)
 if not play.anim then return end
 if not Fn.beginRig() then return end
 play.paused = true
-play.time = math.clamp(t, 0, play.anim.duration)
+play.time = math.clamp(t, 0, play.dur)
 Fn.applyPose(play.time)
 refreshPlayUI()
 refreshBanner()
@@ -981,13 +1142,14 @@ Fn.hold(Players.PlayerAdded:Connect(function() if UI.playersList.Visible then re
 Fn.hold(Players.PlayerRemoving:Connect(function() task.defer(function() if UI.playersList.Visible then refreshPlayers() end end) end))
 local rc = Fn.card(recPage, 56, "SAMPLE RATE")
 local rh = Fn.new("Frame", {Parent = rc, Position = UDim2.new(0, 8, 0, 22), Size = UDim2.new(1, -16, 0, 26), BackgroundTransparency = 1})
+local oc = Fn.card(recPage, 56, "RECORD OPTIONS")
+local oh = Fn.new("Frame", {Parent = oc, Position = UDim2.new(0, 10, 0, 24), Size = UDim2.new(1, -20, 0, 26), BackgroundTransparency = 1})
+UI.cdT = Fn.makeToggle(oh, "3-2-1 countdown before recording", CFG.countdown, function(v) CFG.countdown = v end)
 UI.rateSeg = Fn.makeSegmented(rh, {{label = "20", value = 20}, {label = "30", value = 30}, {label = "60", value = 60}, {label = "MAX", value = 0}}, CFG.fps, function(v) CFG.fps = v end)
 UI.recBtn = Fn.makeButton(Fn.item(recPage, "Frame", {Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1}), "START RECORDING   [R]", THEME.red, UDim2.new(1, 0, 1, 0), nil, 15)
 UI.recDot = Fn.new("Frame", {Parent = UI.recBtn, Position = UDim2.new(0, 14, 0.5, -6), Size = UDim2.fromOffset(12, 12), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0})
 Fn.corner(UI.recDot, 6)
-UI.recBtn.MouseButton1Click:Connect(function()
-if rec.active then stopRecording() else startRecording() end
-end)
+UI.recBtn.MouseButton1Click:Connect(function() Fn.requestRecord() end)
 local sc = Fn.card(recPage, 46)
 local function stat(idx, title)
 local f = Fn.new("Frame", {Parent = sc, Position = UDim2.new((idx - 1) / 3, 0, 0, 0), Size = UDim2.new(1 / 3, 0, 1, 0), BackgroundTransparency = 1})
@@ -1022,7 +1184,7 @@ refreshLibrary()
 setStatus("saved", THEME.green)
 end)
 bPrev.MouseButton1Click:Connect(function()
-if pending[1] then loadAnim(pending[1], true) switchTab("PLAYER") end
+if pending[1] then Fn.loadScene(pending, true) switchTab("PLAYER") end
 end)
 bDisc.MouseButton1Click:Connect(function() pending = {} refreshRecordUI() setStatus("idle") end)
 local bc = Fn.card(recPage, 152, "INSTANT REPLAY")
@@ -1057,7 +1219,7 @@ function refreshRecordUI()
 if rec.active then
 Fn.setBtn(UI.recBtn, "STOP RECORDING   [R]", THEME.gray)
 else
-Fn.setBtn(UI.recBtn, "START RECORDING   [R]", THEME.red)
+Fn.setBtn(UI.recBtn, "START  (" .. (mode == "ME" and "ME" or (mode == "TARGET" and "TARGET" or "ME + TARGET")) .. ")  [R]", THEME.red)
 UI.recDot.BackgroundTransparency = 0
 end
 local n = rec.active and rec.takes[1] and #rec.takes[1].frames or (pending[1] and #pending[1].frames or 0)
@@ -1117,7 +1279,12 @@ armed = nil
 Fn.setBtn(bDel, "DELETE")
 library[a.name] = nil
 Fn.unpersistAnim(a.name)
-if play.anim == a then stopPlayback(true) play.anim, play.frames = nil, nil refreshPlayUI() refreshBanner() end
+for _, tr in ipairs(scene) do if tr.anim == a then tr.anim, tr.frames = nil, nil end end
+if play.anim == a then stopPlayback(true) play.anim, play.frames = nil, nil end
+Fn.recalcDur()
+Fn.refreshScene()
+refreshPlayUI()
+refreshBanner()
 libSelected = nil
 refreshLibrary()
 toast("Deleted " .. a.name)
@@ -1173,7 +1340,7 @@ UI.npMeta = Fn.label(np, "load one from the Library tab", 11, THEME.dim, Enum.Fo
 local tc = Fn.card(playPage, 180, "TIMELINE")
 local sh = Fn.new("Frame", {Parent = tc, Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 22), BackgroundTransparency = 1})
 UI.scrubSlider = Fn.makeSlider(sh, 0, 1, 0, function(v)
-if play.anim then Fn.seek(v * play.anim.duration) end
+if play.anim then Fn.seek(v * play.dur) end
 end)
 UI.markA = Fn.new("Frame", {Parent = UI.scrubSlider.track, AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(4, 18), BackgroundColor3 = THEME.green, BorderSizePixel = 0, Visible = false, ZIndex = 3})
 UI.markB = Fn.new("Frame", {Parent = UI.scrubSlider.track, AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(4, 18), BackgroundColor3 = THEME.red, BorderSizePixel = 0, Visible = false, ZIndex = 3})
@@ -1188,7 +1355,7 @@ UI.playBtn.MouseButton1Click:Connect(Fn.togglePlay)
 bRestart.MouseButton1Click:Connect(function()
 if not play.anim then toast("Load an animation first", "err") return end
 if not Fn.beginRig() then return end
-local lo, hi = play.a or 0, play.b or play.anim.duration
+local lo, hi = play.a or 0, play.b or play.dur
 play.time = play.dir < 0 and hi or lo
 play.paused = false
 refreshPlayUI()
@@ -1210,7 +1377,7 @@ if not play.anim then toast("Load an animation first", "err") return end
 if not Fn.beginRig() then return end
 play.revHold, play.prevPaused = true, play.paused
 play.paused, play.dir = false, -1
-if play.time <= 0 then play.time = play.anim.duration end
+if play.time <= 0 then play.time = play.dur end
 end
 local function rewStop()
 if not play.revHold then return end
@@ -1242,11 +1409,15 @@ refreshPlayUI()
 end)
 bCl.MouseButton1Click:Connect(function() play.a, play.b = nil, nil refreshPlayUI() end)
 bTrim.MouseButton1Click:Connect(Fn.saveTrim)
-local cc = Fn.card(playPage, 196, "CONTROLS")
+local cc = Fn.card(playPage, 228, "CONTROLS")
 local _, slot = Fn.innerList(cc, 22)
 UI.speedLabel = Fn.label(slot(14), string.format("SPEED  %.2fx", CFG.speed), 12, THEME.text, Enum.Font.GothamBold, nil, {Size = UDim2.new(1, 0, 1, 0)})
 Fn.makeSlider(slot(22), 0.1, 3, CFG.speed, function(v)
 v = math.floor(v * 20 + 0.5) / 20
+CFG.speed = v
+UI.speedLabel.Text = string.format("SPEED  %.2fx", v)
+end)
+UI.speedSeg = Fn.makeSegmented(slot(26), {{label = "0.25x", value = 0.25}, {label = "0.5x", value = 0.5}, {label = "1x", value = 1}, {label = "2x", value = 2}}, CFG.speed, function(v)
 CFG.speed = v
 UI.speedLabel.Text = string.format("SPEED  %.2fx", v)
 end)
@@ -1258,8 +1429,45 @@ end)
 UI.mirrorT = Fn.makeToggle(slot(26), "Mirror (swap left / right)", CFG.mirror, function(v) CFG.mirror = v if play.active then Fn.applyPose(play.time) end end)
 UI.rootT = Fn.makeToggle(slot(26), "Root motion (movement / jumps)", CFG.rootMotion, function(v) CFG.rootMotion = v if play.active then Fn.applyPose(play.time) end end)
 end
+do
+local sc = Fn.card(playPage, 80, "CLONES")
+UI.sceneCard = sc
+UI.sceneInner = Fn.new("Frame", {Parent = sc, Position = UDim2.new(0, 8, 0, 22), Size = UDim2.new(1, -16, 1, -28), BackgroundTransparency = 1})
+Fn.new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = UI.sceneInner})
+end
+function Fn.refreshScene()
+for _, c in ipairs(UI.sceneInner:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+for i, tr in ipairs(scene) do
+local row = Fn.new("Frame", {Parent = UI.sceneInner, LayoutOrder = i, Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = THEME.panel2, BorderSizePixel = 0})
+Fn.corner(row, 6)
+local nm = tr.anim and (tr.anim.name ~= "" and tr.anim.name or "unsaved take") or "(no animation)"
+Fn.label(row, "#" .. i .. "  " .. nm .. (tr.delay > 0 and string.format("   +%.1fs", tr.delay) or ""), 12, THEME.text, Enum.Font.GothamBold, nil, {Position = UDim2.new(0, 8, 0, 4), Size = UDim2.new(1, -16, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd})
+local br = Fn.btnRow(row, 25, 28)
+local bA = Fn.makeButton(br, "ASSIGN", THEME.green, UDim2.new(0.28, -4, 1, 0), nil, 11)
+local bM = Fn.makeButton(br, "MIRROR", tr.mirror and THEME.accent or THEME.gray, UDim2.new(0.26, -4, 1, 0), nil, 11)
+local bD1 = Fn.makeButton(br, "-.1s", THEME.gray, UDim2.new(0.15, -4, 1, 0), nil, 11)
+local bD2 = Fn.makeButton(br, "+.1s", THEME.gray, UDim2.new(0.15, -4, 1, 0), nil, 11)
+local bX = Fn.makeButton(br, "X", THEME.red, UDim2.new(0.12, -4, 1, 0), nil, 12)
+bA.MouseButton1Click:Connect(function()
+local a = (libSelected and library[libSelected]) or play.anim
+if not a then toast("Select an animation in Library first", "err") return end
+Fn.assignAnim(i, a)
+end)
+bM.MouseButton1Click:Connect(function() tr.mirror = not tr.mirror if play.active then Fn.applyPose(play.time) end Fn.refreshScene() end)
+bD1.MouseButton1Click:Connect(function() tr.delay = math.max(0, tr.delay - 0.1) Fn.recalcDur() if play.active then Fn.applyPose(play.time) end Fn.refreshScene() end)
+bD2.MouseButton1Click:Connect(function() tr.delay = tr.delay + 0.1 Fn.recalcDur() if play.active then Fn.applyPose(play.time) end Fn.refreshScene() end)
+bX.MouseButton1Click:Connect(function() Fn.removeTrack(i) end)
+end
+local ar = Fn.new("Frame", {Parent = UI.sceneInner, LayoutOrder = 999, Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1})
+Fn.new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), Parent = ar})
+local bAdd = Fn.makeButton(ar, "+ ADD CLONE", THEME.blue, UDim2.new(0.6, -3, 1, 0), nil, 13)
+local bRe = Fn.makeButton(ar, "RESET", THEME.gray, UDim2.new(0.4, -3, 1, 0), nil, 12)
+bAdd.MouseButton1Click:Connect(Fn.addClone)
+bRe.MouseButton1Click:Connect(Fn.resetClones)
+UI.sceneCard.Size = UDim2.new(1, 0, 0, 22 + #scene * 62 + 32 + 8)
+end
 function Fn.updMarkers()
-local d = play.anim and math.max(play.anim.duration, 1e-3) or 1
+local d = play.anim and math.max(play.dur, 1e-3) or 1
 UI.markA.Visible = play.a ~= nil
 UI.markB.Visible = play.b ~= nil
 if play.a then UI.markA.Position = UDim2.new(play.a / d, 0, 0.5, 0) end
@@ -1268,9 +1476,9 @@ end
 function refreshPlayUI()
 if play.anim then
 UI.npName.Text = play.anim.name ~= "" and play.anim.name or "(unsaved take)"
-UI.npMeta.Text = string.format("%s  -  %d frames  -  %.2fs  -  %s", play.anim.rig, #play.anim.frames, play.anim.duration, play.active and (play.paused and "paused" or "playing") or "stopped")
-UI.timeLabel.Text = Fn.fmtTime(play.time) .. " / " .. Fn.fmtTime(play.anim.duration)
-UI.scrubSlider.set(play.time / math.max(play.anim.duration, 1e-3))
+UI.npMeta.Text = string.format("%s  -  %d frames  -  %.2fs  -  %s", play.anim.rig, #play.anim.frames, play.dur, play.active and (play.paused and "paused" or "playing") or "stopped")
+UI.timeLabel.Text = Fn.fmtTime(play.time) .. " / " .. Fn.fmtTime(play.dur)
+UI.scrubSlider.set(play.time / math.max(play.dur, 1e-3))
 else
 UI.npName.Text = "nothing loaded"
 UI.npMeta.Text = "load one from the Library tab"
@@ -1296,6 +1504,13 @@ overSet[banner] = false
 end
 end
 bannerExit.MouseButton1Click:Connect(function() stopPlayback() toast("Left preview") end)
+bannerRec.MouseButton1Click:Connect(function()
+stopPlayback(true)
+refreshBanner()
+Fn.setMinimized(false)
+switchTab("REC")
+toast("Back to recording", "ok")
+end)
 do
 local vc = Fn.card(setPage, 134, "INTERFACE")
 local _, slot = Fn.innerList(vc, 22)
@@ -1310,17 +1525,22 @@ Fn.makeToggle(slot(26), "Toast notifications", CFG.toasts, function(v) CFG.toast
 Fn.makeToggle(slot(26), "Cursor tag while hovering", CFG.hoverTag, function(v) CFG.hoverTag = v if not v then hoverTag.Visible = false end end)
 local sc = Fn.card(setPage, 84, "SELECTING")
 local _, slot2 = Fn.innerList(sc, 22)
-Fn.makeToggle(slot2(26), "Auto-switch to TARGET on click", CFG.autoTarget, function(v) CFG.autoTarget = v end)
+Fn.makeToggle(slot2(26), "Click a target = ME + TARGET mode", CFG.autoDual, function(v) CFG.autoDual = v end)
 Fn.makeToggle(slot2(26), "Apply my avatar to clone", CFG.applyAvatar, function(v) CFG.applyAvatar = v end)
-local cc = Fn.card(setPage, 76, "CLONE")
+local cc = Fn.card(setPage, 126, "CLONE")
 local _, slot3 = Fn.innerList(cc, 22)
 local dl = Fn.label(slot3(14), "DISTANCE  " .. CFG.cloneDist .. " studs", 12, THEME.text, Enum.Font.GothamBold, nil, {Size = UDim2.new(1, 0, 1, 0)})
 Fn.makeSlider(slot3(22), 3, 20, CFG.cloneDist, function(v)
 CFG.cloneDist = math.floor(v + 0.5)
 dl.Text = "DISTANCE  " .. CFG.cloneDist .. " studs"
 end, nil, function() if not play.active then spawnClone() end end)
-local kc = Fn.card(setPage, 128, "HOTKEYS")
-Fn.label(kc, "R            record / stop\nT            new clone\nP            play / pause\nX            exit preview\n, and .      step one frame\nRightShift   hide / show window", 12, THEME.text, Enum.Font.Code, nil, {Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 100), TextYAlignment = Enum.TextYAlignment.Top})
+local gl = Fn.label(slot3(14), "CLONE SPACING  " .. CFG.cloneGap .. " studs", 12, THEME.text, Enum.Font.GothamBold, nil, {Size = UDim2.new(1, 0, 1, 0)})
+Fn.makeSlider(slot3(22), 2, 12, CFG.cloneGap, function(v)
+CFG.cloneGap = math.floor(v + 0.5)
+gl.Text = "CLONE SPACING  " .. CFG.cloneGap .. " studs"
+end, nil, function() if not play.active then spawnClone() end end)
+local kc = Fn.card(setPage, 142, "HOTKEYS")
+Fn.label(kc, "R            record / stop\nT            new clone\nP            play / pause\nX            exit preview\nREC (banner) back to recording\n, and .      step one frame\nRightShift   hide / show window", 12, THEME.text, Enum.Font.Code, nil, {Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 116), TextYAlignment = Enum.TextYAlignment.Top})
 local ac = Fn.card(setPage, 70, "STORAGE")
 Fn.label(ac, (HAS_FS and ("Saving to workspace/" .. FOLDER_NAME .. "  (settings are remembered)") or "Studio mode: saved in ReplicatedStorage.AnimStealer_Library for this session - use COPY JSON to keep."), 11, THEME.dim, Enum.Font.Gotham, nil, {Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 42), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top})
 end
@@ -1365,7 +1585,7 @@ if recConn then recConn:Disconnect() end
 if targetConn then targetConn:Disconnect() end
 if highlight then highlight:Destroy() end
 if hoverHL then hoverHL:Destroy() end
-if clone then clone:Destroy() end
+for _, tr in ipairs(scene) do if tr.clone then tr.clone:Destroy() end end
 if screenGui then screenGui:Destroy() end
 _G.__AnimStealerDestroy = nil
 end
@@ -1388,10 +1608,10 @@ local uiAcc, hoverAcc, cfgAcc = 0, 0, 0
 local mouseAvailable = UserInputService.MouseEnabled
 Fn.hold(RunService.RenderStepped:Connect(function(dt)
 if play.active then
-if not clone or not clone.Parent then
+if not Fn.sceneAlive() then
 stopPlayback()
 elseif not play.paused and play.anim then
-local dur = play.anim.duration
+local dur = play.dur
 local lo, hi = play.a or 0, play.b or dur
 if hi - lo < 0.02 then lo, hi = 0, dur end
 play.time = play.time + dt * CFG.speed * play.dir * (play.revHold and 1.5 or 1)
@@ -1449,8 +1669,8 @@ if play.active and play.anim then
 subText.Text = (play.paused and "paused  " or "playing  ") .. Fn.fmtTime(play.time)
 subText.TextColor3 = THEME.green
 if not minimized and screenGui.Enabled and not UI.scrubSlider.dragging then
-UI.timeLabel.Text = Fn.fmtTime(play.time) .. " / " .. Fn.fmtTime(play.anim.duration)
-UI.scrubSlider.set(play.time / math.max(play.anim.duration, 1e-3))
+UI.timeLabel.Text = Fn.fmtTime(play.time) .. " / " .. Fn.fmtTime(play.dur)
+UI.scrubSlider.set(play.time / math.max(play.dur, 1e-3))
 end
 else
 subText.Text = "v" .. VERSION .. "  -  idle"
@@ -1478,7 +1698,7 @@ local res = Fn.rayAtScreen(loc)
 local m = res and Fn.rigFromPart(res.Instance)
 if m then
 setTarget(m)
-if CFG.autoTarget and mode == "ME" then UI.modeSeg.set("TARGET") end
+if CFG.autoDual and mode == "ME" then UI.modeSeg.set("DUAL") end
 end
 return
 end
@@ -1488,7 +1708,7 @@ if k == Enum.KeyCode.RightShift then
 screenGui.Enabled = not screenGui.Enabled
 if not screenGui.Enabled then Fn.setHover(nil) end
 elseif k == Enum.KeyCode.R then
-if rec.active then stopRecording() else startRecording() end
+Fn.requestRecord()
 elseif k == Enum.KeyCode.T then
 spawnClone()
 elseif k == Enum.KeyCode.P then
@@ -1501,7 +1721,7 @@ elseif k == Enum.KeyCode.Period then
 Fn.stepBy(Fn.frameDt())
 end
 end))
-Fn.hold(player.CharacterAdded:Connect(function() task.wait(0.5) if not clone then spawnClone() end end))
+Fn.hold(player.CharacterAdded:Connect(function() task.wait(0.5) if #scene == 0 then spawnClone() end end))
 Fn.loadLibraryFromStore()
 refreshLibrary()
 refreshTarget()
