@@ -34,13 +34,13 @@ studioStore = ReplicatedStorage:FindFirstChild("AnimStealer_Library") or Instanc
 studioStore.Name = "AnimStealer_Library"
 studioStore.Parent = ReplicatedStorage
 end
-local VERSION = "4.0"
+local VERSION = "5.0"
 local CFG = {
 fps = 60, rootMotion = false, applyAvatar = true, cloneDist = 6, toasts = true, uiScale = nil,
-loop = true, speed = 1, quickSelect = true, autoDual = false, hoverTag = true, bufferSecs = 10, countdown = false, cloneGap = 4,
+loop = true, speed = 1, quickSelect = true, autoDual = false, hoverTag = true, bufferSecs = 10, countdown = false, cloneGap = 4, recIdle = true, recWalk = true, npcRadius = 1125, npcWithMe = false,
 mirror = false, reverse = false, bufferOn = false, -- session only
 }
-local SAVE_KEYS = {"fps", "rootMotion", "applyAvatar", "cloneDist", "toasts", "uiScale", "loop", "speed", "quickSelect", "autoDual", "hoverTag", "bufferSecs", "countdown", "cloneGap"}
+local SAVE_KEYS = {"fps", "rootMotion", "applyAvatar", "cloneDist", "toasts", "uiScale", "loop", "speed", "quickSelect", "autoDual", "hoverTag", "bufferSecs", "countdown", "cloneGap", "recIdle", "recWalk", "npcRadius", "npcWithMe"}
 local MAX_FRAMES = 20000
 if HAS_FS then
 pcall(function()
@@ -67,7 +67,7 @@ function Fn.hold(c) conns[#conns + 1] = c return c end
 local library = {}
 local libSelected = nil
 local pending = {}
-local mode = "ME" -- ME | TARGET | DUAL
+local mode = "ME" -- ME | TARGET | DUAL | NPCS
 local target, highlight, targetConn = nil, nil, nil
 local hoverModel, hoverHL = nil, nil
 local overSet = {}
@@ -75,6 +75,7 @@ function Fn.isOver() for _, v in pairs(overSet) do if v then return true end end
 local rec = {active = false, takes = {}, t = 0, acc = 0, counting = false}
 local play = {active = false, paused = false, time = 0, anim = nil, frames = nil, dir = 1, a = nil, b = nil, revHold = false, prevPaused = false, dur = 0}
 local scene = {}
+local NPC = {sel = {}, hl = {}, list = {}, busy = false}
 local buf = {take = nil, t = 0, acc = 0, trim = 0}
 local toast, refreshLibrary, refreshPlayUI, refreshRecordUI, refreshTarget, switchTab, setStatus
 local stopRecording, stopPlayback, startRecording, spawnClone, setTarget, loadAnim, refreshBanner
@@ -552,14 +553,34 @@ Fn.corner(underline, 2)
 tabBtns[name] = {btn = b, line = underline}
 b.MouseButton1Click:Connect(function() switchTab(name) end)
 end
-function switchTab(name)
-if name == "REC" and play.active then stopPlayback() end
+function Fn.showTab(name)
 for n, p in pairs(pages) do p.Visible = (n == name) end
 for n, t in pairs(tabBtns) do
 local on = n == name
 t.btn.TextColor3 = on and THEME.accent or THEME.dim
 Fn.tw(t.line, 0.15, {Size = UDim2.new(on and 0.7 or 0, 0, 0, 3)})
 end
+end
+function Fn.hardExit()
+local ok, err = pcall(stopPlayback, true)
+if not ok then warn("[AnimationStealer] exit step: " .. tostring(err)) end
+play.active, play.paused, play.revHold, play.time = false, false, false, 0
+pcall(function()
+for _, tr in ipairs(scene) do
+if tr.clone and tr.clone.Parent then
+Fn.setCloneRig(tr, false)
+if tr.base then tr.clone.HumanoidRootPart.CFrame = tr.base end
+end
+end
+end)
+banner.Visible = false
+overSet[banner] = false
+pcall(refreshPlayUI)
+return ok
+end
+function switchTab(name)
+if name == "REC" and play.active then Fn.hardExit() end
+Fn.showTab(name)
 end
 function Fn.createDummy()
 local dummy = Instance.new("Model")
@@ -758,6 +779,100 @@ rayParams.FilterDescendantsInstances = ex
 local ray = cam:ViewportPointToRay(loc.X, loc.Y)
 return Workspace:Raycast(ray.Origin, ray.Direction * 1000, rayParams)
 end
+function Fn.npcIndex(m)
+for i, x in ipairs(NPC.sel) do if x == m then return i end end
+return nil
+end
+function Fn.npcRefreshHL()
+for m, h in pairs(NPC.hl) do
+if not m.Parent or not Fn.npcIndex(m) then h:Destroy() NPC.hl[m] = nil end
+end
+for _, m in ipairs(NPC.sel) do
+if not NPC.hl[m] then
+local ok, h = pcall(function()
+local x = Instance.new("Highlight")
+x.Adornee, x.FillColor, x.OutlineColor = m, THEME.green, THEME.green
+x.FillTransparency, x.DepthMode = 0.8, Enum.HighlightDepthMode.AlwaysOnTop
+x.Parent = m
+return x
+end)
+if ok then NPC.hl[m] = h end
+end
+end
+end
+function Fn.npcRefreshList()
+if not UI.npcList then return end
+for _, c in ipairs(UI.npcList:GetChildren()) do if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end end
+if #NPC.list == 0 then
+Fn.label(UI.npcList, NPC.busy and "  scanning..." or "  tap SCAN to find NPCs near you", 12, THEME.dim)
+return
+end
+local char = player.Character
+local hrp = char and char:FindFirstChild("HumanoidRootPart")
+for i, it in ipairs(NPC.list) do
+local m = it.model
+if i > 60 then break end
+if m.Parent then
+local on = Fn.npcIndex(m) ~= nil
+local root = Fn.getRoot(m)
+local d = (hrp and root) and (root.Position - hrp.Position).Magnitude or it.dist
+local row = Fn.new("TextButton", {Parent = UI.npcList, LayoutOrder = math.floor(d), Size = UDim2.new(1, -4, 0, 36), BackgroundColor3 = on and THEME.panel2 or THEME.panel, BorderSizePixel = 0, Text = "", AutoButtonColor = false})
+Fn.corner(row, 6)
+Fn.stroke(row, on and THEME.green or THEME.stroke, 2)
+Fn.label(row, m.Name, 12, THEME.text, Enum.Font.GothamBold, nil, {Position = UDim2.new(0, 8, 0, 3), Size = UDim2.new(1, -70, 0, 15), TextTruncate = Enum.TextTruncate.AtEnd})
+Fn.label(row, string.format("%d studs  -  %s", math.floor(d), Fn.detectRig(m)), 11, THEME.dim, Enum.Font.Gotham, nil, {Position = UDim2.new(0, 8, 0, 19), Size = UDim2.new(1, -70, 0, 13)})
+if on then Fn.label(row, "PICKED", 10, THEME.green, Enum.Font.GothamBold, Enum.TextXAlignment.Right, {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(50, 14)}) end
+row.MouseButton1Click:Connect(function() Fn.npcToggle(m) end)
+end
+end
+end
+function Fn.npcToggle(m)
+local i = Fn.npcIndex(m)
+if i then
+table.remove(NPC.sel, i)
+toast("Removed " .. m.Name)
+else
+if #NPC.sel >= 5 then toast("Max 5 NPCs at once", "err") return end
+NPC.sel[#NPC.sel + 1] = m
+toast("Picked " .. m.Name, "ok")
+end
+Fn.npcRefreshHL()
+Fn.npcRefreshList()
+end
+function Fn.npcScan()
+if NPC.busy then return end
+local char = player.Character
+local hrp = char and char:FindFirstChild("HumanoidRootPart")
+if not hrp then toast("No character", "err") return end
+NPC.busy = true
+Fn.npcRefreshList()
+local origin, radius = hrp.Position, CFG.npcRadius
+task.spawn(function()
+local found, seen = {}, {}
+local ok, desc = pcall(function() return Workspace:GetDescendants() end)
+if ok then
+for i, d in ipairs(desc) do
+if i % 4000 == 0 then task.wait() end
+if d:IsA("Humanoid") or d:IsA("AnimationController") then
+local m = d.Parent
+if m and m:IsA("Model") and not seen[m] and m ~= char and m.Name ~= "StealerClone" and not Players:GetPlayerFromCharacter(m) then
+seen[m] = true
+local root = Fn.getRoot(m)
+if root and Fn.detectRig(m) ~= "?" then
+local dist = (root.Position - origin).Magnitude
+if dist <= radius then found[#found + 1] = {model = m, dist = dist} end
+end
+end
+end
+end
+end
+table.sort(found, function(a, b) return a.dist < b.dist end)
+NPC.list = found
+NPC.busy = false
+Fn.npcRefreshList()
+toast("Found " .. #found .. " NPC(s) within " .. radius .. " studs", #found > 0 and "ok" or nil)
+end)
+end
 function Fn.pickFromExplorer()
 local ok, sel = pcall(function() return Selection:Get() end)  -- Studio only
 if ok and sel and #sel > 0 then
@@ -776,7 +891,53 @@ for _, n in ipairs(PART_NAMES) do
 local p = model:FindFirstChild(n)
 if p and p:IsA("BasePart") and p ~= root then parts[#parts + 1] = p end
 end
-return {label = lbl, model = model, rig = Fn.detectRig(model), root = root, parts = parts, frames = {}}
+local ctl = model:FindFirstChildOfClass("Humanoid") or model:FindFirstChildOfClass("AnimationController")
+local animator = ctl and ctl:FindFirstChildOfClass("Animator")
+return {label = lbl, model = model, rig = Fn.detectRig(model), root = root, parts = parts, frames = {}, animator = animator, skipT = 0, lastTick = 0, prevRel = {}, state = "main"}
+end
+function Fn.classify(take)
+local root = take.root
+local now = os.clock()
+local pos = root.Position
+local dtc = take.prevClock and math.max(now - take.prevClock, 1e-3) or 1
+local speed = 0
+if take.prevPos then
+speed = Vector3.new(pos.X - take.prevPos.X, 0, pos.Z - take.prevPos.Z).Magnitude / dtc
+end
+take.prevPos, take.prevClock = pos, now
+local main, walk, idle = false, false, false
+if take.animator then
+local ok, tracks = pcall(function() return take.animator:GetPlayingAnimationTracks() end)
+if ok and tracks then
+for _, t in ipairs(tracks) do
+local w = 1
+pcall(function() w = t.WeightCurrent end)
+if w > 0.1 then
+local a = t.Animation
+local nm = (tostring(t.Name) .. " " .. (a and tostring(a.Name) or "") .. " " .. ((a and a.Parent) and tostring(a.Parent.Name) or "")):lower()
+if nm:find("idle") then idle = true
+elseif nm:find("walk") or nm:find("run") or nm:find("sprint") or nm:find("jog") then walk = true
+else main = true end
+end
+end
+end
+end
+local rootCF = root.CFrame
+local lm = 0
+for _, p in ipairs(take.parts) do
+if p.Parent then
+local rp = rootCF:PointToObjectSpace(p.Position)
+local pr = take.prevRel[p]
+if pr then lm = math.max(lm, (rp - pr).Magnitude) end
+take.prevRel[p] = rp
+end
+end
+if main then return "main" end
+if walk then return "walk" end
+if idle then return "idle" end
+if speed >= 1.2 then return "walk" end
+if lm / dtc < 1.5 then return "idle" end
+return "main"
 end
 function Fn.sampleTake(take, t)
 if not take.root.Parent then return end
@@ -837,7 +998,7 @@ local recConn
 function Fn.requestRecord()
 if rec.active then stopRecording() return end
 if rec.counting then rec.counting = false setStatus("idle") toast("Countdown cancelled") return end
-if play.active then stopPlayback(true) refreshBanner() end
+if play.active then Fn.hardExit() end
 if CFG.countdown then
 rec.counting = true
 task.spawn(function()
@@ -857,20 +1018,35 @@ end
 end
 function startRecording()
 if rec.active then return end
-if play.active then stopPlayback() end
+if play.active then Fn.hardExit() end
 local takes = {}
-if mode ~= "TARGET" then
+if mode == "ME" or mode == "DUAL" then
 local c = player.Character
 local t = c and Fn.newTake(c, "me")
 if not t then toast("Your character isn't ready", "err") return end
 takes[#takes + 1] = t
 end
-if mode ~= "ME" then
+if mode == "TARGET" or mode == "DUAL" then
 if not target or not target.Parent then toast("Click a character to target it first", "err") return end
 if target == player.Character and mode == "DUAL" then toast("Target is you - pick someone else", "err") return end
 local t = Fn.newTake(target, "target")
 if not t then toast("Target has no root part", "err") return end
 takes[#takes + 1] = t
+end
+if mode == "NPCS" then
+if #NPC.sel == 0 then toast("Pick NPCs first (NPCS NEARBY card)", "err") return end
+if CFG.npcWithMe then
+local c = player.Character
+local t = c and Fn.newTake(c, "me")
+if t then takes[#takes + 1] = t end
+end
+for _, m in ipairs(NPC.sel) do
+if m.Parent then
+local t = Fn.newTake(m, (m.Name:gsub("[^%w]", "")))
+if t then takes[#takes + 1] = t end
+end
+end
+if #takes == 0 then toast("None of those NPCs can be recorded", "err") return end
 end
 rec.active, rec.takes, rec.t, rec.acc = true, takes, 0, 1e9
 pending = {}
@@ -881,7 +1057,18 @@ rec.acc = rec.acc + dt
 local interval = CFG.fps > 0 and 1 / CFG.fps or 0
 if rec.acc >= interval then
 rec.acc = 0
-for _, take in ipairs(rec.takes) do Fn.sampleTake(take, rec.t) end
+for _, take in ipairs(rec.takes) do
+local gap = rec.t - take.lastTick
+take.lastTick = rec.t
+local st = "main"
+if not CFG.recIdle or not CFG.recWalk then st = Fn.classify(take) end
+take.state = st
+if (st == "idle" and not CFG.recIdle) or (st == "walk" and not CFG.recWalk) then
+take.skipT = take.skipT + gap
+else
+Fn.sampleTake(take, rec.t - take.skipT)
+end
+end
 if not rec.takes[1].root.Parent then
 toast("Recording subject disappeared", "err")
 stopRecording()
@@ -1096,7 +1283,7 @@ toast("Saved " .. n.name, "ok")
 end
 do
 local r = Fn.item(recPage, "Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1})
-UI.modeSeg = Fn.makeSegmented(r, {{label = "ME", value = "ME"}, {label = "TARGET", value = "TARGET"}, {label = "ME + TARGET", value = "DUAL"}}, mode, function(v)
+UI.modeSeg = Fn.makeSegmented(r, {{label = "ME", value = "ME"}, {label = "TARGET", value = "TARGET"}, {label = "ME + T", value = "DUAL"}, {label = "NPCS", value = "NPCS"}}, mode, function(v)
 mode = v
 refreshRecordUI()
 end)
@@ -1140,11 +1327,48 @@ if UI.playersList.Visible then refreshPlayers() end
 end)
 Fn.hold(Players.PlayerAdded:Connect(function() if UI.playersList.Visible then refreshPlayers() end end))
 Fn.hold(Players.PlayerRemoving:Connect(function() task.defer(function() if UI.playersList.Visible then refreshPlayers() end end) end))
+local nc = Fn.card(recPage, 290, "NPCS NEARBY  (pick NPCS mode to record them)")
+local _, nslot = Fn.innerList(nc, 22)
+local nl = Fn.label(nslot(14), "RADIUS  " .. CFG.npcRadius .. " studs", 12, THEME.text, Enum.Font.GothamBold, nil, {Size = UDim2.new(1, 0, 1, 0)})
+Fn.makeSlider(nslot(22), 50, 1125, CFG.npcRadius, function(v)
+CFG.npcRadius = math.floor(v / 5 + 0.5) * 5
+nl.Text = "RADIUS  " .. CFG.npcRadius .. " studs"
+end)
+local nbr = nslot(32)
+Fn.new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), Parent = nbr})
+local bScan = Fn.makeButton(nbr, "SCAN", THEME.blue, UDim2.new(0.3, -3, 1, 0), nil, 13)
+local bNone = Fn.makeButton(nbr, "CLEAR", THEME.gray, UDim2.new(0.28, -3, 1, 0), nil, 12)
+local bNear = Fn.makeButton(nbr, "NEAREST 5", THEME.green, UDim2.new(0.42, -3, 1, 0), nil, 12)
+bScan.MouseButton1Click:Connect(Fn.npcScan)
+bNone.MouseButton1Click:Connect(function()
+NPC.sel = {}
+Fn.npcRefreshHL()
+Fn.npcRefreshList()
+end)
+bNear.MouseButton1Click:Connect(function()
+if #NPC.list == 0 then toast("Scan first", "err") return end
+NPC.sel = {}
+for i = 1, math.min(5, #NPC.list) do NPC.sel[#NPC.sel + 1] = NPC.list[i].model end
+Fn.npcRefreshHL()
+Fn.npcRefreshList()
+UI.modeSeg.set("NPCS")
+end)
+UI.npcMeT = Fn.makeToggle(nslot(26), "Also record me", CFG.npcWithMe, function(v) CFG.npcWithMe = v end)
+local lh = nslot(130)
+UI.npcList = Fn.new("ScrollingFrame", {Parent = lh, Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = THEME.inset, BorderSizePixel = 0, ScrollBarThickness = 4, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y})
+Fn.corner(UI.npcList, 8)
+Fn.stroke(UI.npcList, THEME.stroke, 2)
+Fn.pad(UI.npcList, 4, 4)
+Fn.new("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = UI.npcList})
+Fn.npcRefreshList()
 local rc = Fn.card(recPage, 56, "SAMPLE RATE")
 local rh = Fn.new("Frame", {Parent = rc, Position = UDim2.new(0, 8, 0, 22), Size = UDim2.new(1, -16, 0, 26), BackgroundTransparency = 1})
-local oc = Fn.card(recPage, 56, "RECORD OPTIONS")
-local oh = Fn.new("Frame", {Parent = oc, Position = UDim2.new(0, 10, 0, 24), Size = UDim2.new(1, -20, 0, 26), BackgroundTransparency = 1})
-UI.cdT = Fn.makeToggle(oh, "3-2-1 countdown before recording", CFG.countdown, function(v) CFG.countdown = v end)
+local oc = Fn.card(recPage, 148, "RECORD OPTIONS")
+local _, oslot = Fn.innerList(oc, 22)
+UI.cdT = Fn.makeToggle(oslot(26), "3-2-1 countdown before recording", CFG.countdown, function(v) CFG.countdown = v end)
+UI.idleT = Fn.makeToggle(oslot(26), "Record idle", CFG.recIdle, function(v) CFG.recIdle = v end)
+UI.walkT = Fn.makeToggle(oslot(26), "Record walking / running", CFG.recWalk, function(v) CFG.recWalk = v end)
+Fn.label(oslot(28), "Turn idle and walk OFF to capture only the main action (works for NPCs and me).", 11, THEME.dim, Enum.Font.Gotham, nil, {Size = UDim2.new(1, 0, 1, 0), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top})
 UI.rateSeg = Fn.makeSegmented(rh, {{label = "20", value = 20}, {label = "30", value = 30}, {label = "60", value = 60}, {label = "MAX", value = 0}}, CFG.fps, function(v) CFG.fps = v end)
 UI.recBtn = Fn.makeButton(Fn.item(recPage, "Frame", {Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1}), "START RECORDING   [R]", THEME.red, UDim2.new(1, 0, 1, 0), nil, 15)
 UI.recDot = Fn.new("Frame", {Parent = UI.recBtn, Position = UDim2.new(0, 14, 0.5, -6), Size = UDim2.fromOffset(12, 12), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0})
@@ -1219,7 +1443,7 @@ function refreshRecordUI()
 if rec.active then
 Fn.setBtn(UI.recBtn, "STOP RECORDING   [R]", THEME.gray)
 else
-Fn.setBtn(UI.recBtn, "START  (" .. (mode == "ME" and "ME" or (mode == "TARGET" and "TARGET" or "ME + TARGET")) .. ")  [R]", THEME.red)
+Fn.setBtn(UI.recBtn, "START  (" .. ({ME = "ME", TARGET = "TARGET", DUAL = "ME + TARGET", NPCS = "NPCS"})[mode] .. ")  [R]", THEME.red)
 UI.recDot.BackgroundTransparency = 0
 end
 local n = rec.active and rec.takes[1] and #rec.takes[1].frames or (pending[1] and #pending[1].frames or 0)
@@ -1334,6 +1558,11 @@ Fn.label(UI.libList, next(library) and "  no matches" or "  nothing saved yet - 
 end
 end
 do
+local bBack = Fn.makeButton(Fn.item(playPage, "Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1}), "<  BACK TO RECORD", THEME.blue, UDim2.new(1, 0, 1, 0), nil, 13)
+bBack.MouseButton1Click:Connect(function()
+Fn.hardExit()
+Fn.showTab("REC")
+end)
 local np = Fn.card(playPage, 52, "NOW PLAYING")
 UI.npName = Fn.label(np, "nothing loaded", 15, THEME.text, Enum.Font.GothamBold, nil, {Position = UDim2.new(0, 10, 0, 18), Size = UDim2.new(1, -20, 0, 18), TextTruncate = Enum.TextTruncate.AtEnd})
 UI.npMeta = Fn.label(np, "load one from the Library tab", 11, THEME.dim, Enum.Font.Gotham, nil, {Position = UDim2.new(0, 10, 0, 35), Size = UDim2.new(1, -20, 0, 13)})
@@ -1361,7 +1590,7 @@ play.paused = false
 refreshPlayUI()
 refreshBanner()
 end)
-bExit.MouseButton1Click:Connect(function() stopPlayback() end)
+bExit.MouseButton1Click:Connect(function() Fn.hardExit() toast("Left preview") end)
 local r2 = Fn.btnRow(tc, 100, 30)
 local b1 = Fn.makeButton(r2, "-1s", THEME.gray, UDim2.new(0.16, -4, 1, 0), nil, 12)
 local b2 = Fn.makeButton(r2, "-1f", THEME.gray, UDim2.new(0.16, -4, 1, 0), nil, 12)
@@ -1503,12 +1732,11 @@ else
 overSet[banner] = false
 end
 end
-bannerExit.MouseButton1Click:Connect(function() stopPlayback() toast("Left preview") end)
+bannerExit.MouseButton1Click:Connect(function() Fn.hardExit() toast("Left preview") end)
 bannerRec.MouseButton1Click:Connect(function()
-stopPlayback(true)
-refreshBanner()
-Fn.setMinimized(false)
-switchTab("REC")
+Fn.hardExit()
+pcall(Fn.setMinimized, false)
+Fn.showTab("REC")
 toast("Back to recording", "ok")
 end)
 do
@@ -1541,6 +1769,16 @@ gl.Text = "CLONE SPACING  " .. CFG.cloneGap .. " studs"
 end, nil, function() if not play.active then spawnClone() end end)
 local kc = Fn.card(setPage, 142, "HOTKEYS")
 Fn.label(kc, "R            record / stop\nT            new clone\nP            play / pause\nX            exit preview\nREC (banner) back to recording\n, and .      step one frame\nRightShift   hide / show window", 12, THEME.text, Enum.Font.Code, nil, {Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 116), TextYAlignment = Enum.TextYAlignment.Top})
+local fc = Fn.card(setPage, 70, "TROUBLESHOOT")
+local fb = Fn.makeButton(fc, "FORCE RESET (stop everything)", THEME.red, UDim2.new(1, -20, 0, 34), UDim2.new(0, 10, 0, 26), 13)
+fb.MouseButton1Click:Connect(function()
+rec.counting = false
+if rec.active then pcall(stopRecording) end
+Fn.hardExit()
+Fn.showTab("REC")
+setStatus("reset", THEME.green)
+toast("Everything reset", "ok")
+end)
 local ac = Fn.card(setPage, 70, "STORAGE")
 Fn.label(ac, (HAS_FS and ("Saving to workspace/" .. FOLDER_NAME .. "  (settings are remembered)") or "Studio mode: saved in ReplicatedStorage.AnimStealer_Library for this session - use COPY JSON to keep."), 11, THEME.dim, Enum.Font.Gotham, nil, {Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 42), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top})
 end
@@ -1585,6 +1823,7 @@ if recConn then recConn:Disconnect() end
 if targetConn then targetConn:Disconnect() end
 if highlight then highlight:Destroy() end
 if hoverHL then hoverHL:Destroy() end
+for _, h in pairs(NPC.hl) do pcall(function() h:Destroy() end) end
 for _, tr in ipairs(scene) do if tr.clone then tr.clone:Destroy() end end
 if screenGui then screenGui:Destroy() end
 _G.__AnimStealerDestroy = nil
@@ -1656,12 +1895,13 @@ end
 uiAcc = uiAcc + dt
 if uiAcc >= 0.08 then
 uiAcc = 0
+if not play.active and banner.Visible then banner.Visible = false end
 if rec.active then
 UI.statFrames.Text = tostring(rec.takes[1] and #rec.takes[1].frames or 0)
 UI.statTime.Text = Fn.fmtTime(rec.t)
 UI.recDot.BackgroundTransparency = 0.5 + 0.5 * math.sin(os.clock() * 8)
 statusDot.BackgroundTransparency = UI.recDot.BackgroundTransparency * 0.6
-subText.Text = "REC  " .. Fn.fmtTime(rec.t)
+subText.Text = "REC  " .. Fn.fmtTime(rec.t) .. ((rec.takes[1] and rec.takes[1].state ~= "main") and ("  [skipping " .. rec.takes[1].state .. "]") or "")
 subText.TextColor3 = THEME.red
 else
 statusDot.BackgroundTransparency = 0
@@ -1697,8 +1937,12 @@ local loc = input.UserInputType == Enum.UserInputType.Touch and (Vector2.new(inp
 local res = Fn.rayAtScreen(loc)
 local m = res and Fn.rigFromPart(res.Instance)
 if m then
+if mode == "NPCS" then
+Fn.npcToggle(m)
+else
 setTarget(m)
 if CFG.autoDual and mode == "ME" then UI.modeSeg.set("DUAL") end
+end
 end
 return
 end
@@ -1714,7 +1958,7 @@ spawnClone()
 elseif k == Enum.KeyCode.P then
 Fn.togglePlay()
 elseif k == Enum.KeyCode.X then
-if play.active then stopPlayback() toast("Left preview") end
+if play.active then Fn.hardExit() toast("Left preview") end
 elseif k == Enum.KeyCode.Comma then
 Fn.stepBy(-Fn.frameDt())
 elseif k == Enum.KeyCode.Period then
